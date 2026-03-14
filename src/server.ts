@@ -12,11 +12,9 @@ import {
 import { z } from "zod";
 
 export class ChatAgent extends AIChatAgent<Env> {
-  // Wait for MCP connections to restore after hibernation before processing messages
   waitForMcpConnections = true;
 
   onStart() {
-    // Configure OAuth popup behavior for MCP servers that require authentication
     this.mcp.configureOAuthCallback({
       customHandler: (result) => {
         if (result.authSuccess) {
@@ -49,81 +47,42 @@ export class ChatAgent extends AIChatAgent<Env> {
 
     const result = streamText({
       model: workersai("@cf/zai-org/glm-4.7-flash"),
-      system: `You are a helpful assistant. You can check the weather, get the user's timezone, run calculations, and schedule tasks.
+      system: `You are PrepMate, an AI-powered interview preparation coach. Your job is to help users practice for job interviews.
+
+BEHAVIOR:
+- When a user tells you what role or company they are preparing for, remember it and tailor questions accordingly.
+- Ask one interview question at a time. Wait for the user to answer before asking the next one.
+- After the user answers, give constructive feedback: what was strong, what could be improved, and a sample stronger answer.
+- Score each answer on a scale of 1-10 with a brief justification.
+- Track how many questions have been asked in this session.
+- Mix question types: behavioral (STAR method), technical, situational, and culture-fit.
+- If the user says "summary" or "how did I do", give an overall performance summary with strengths, areas to improve, and a final score.
+- Be encouraging but honest. The goal is to help the user improve.
+- If the user hasn't specified a role, start by asking what position they're preparing for.
+
+MEMORY:
+- You have access to the full conversation history. Use it to avoid repeating questions and to reference the user's previous answers when giving feedback.
+- If the user has answered multiple questions, note patterns in their responses (e.g., "You tend to give short answers — try adding more specific examples").
 
 ${getSchedulePrompt({ date: new Date() })}
 
-If the user asks to schedule a task, use the schedule tool to schedule the task.`,
-      // Prune old tool calls to save tokens on long conversations
+If the user asks to schedule a practice session or reminder, use the schedule tool.`,
       messages: pruneMessages({
         messages: await convertToModelMessages(this.messages),
         toolCalls: "before-last-2-messages"
       }),
       tools: {
-        // MCP tools from connected servers
         ...mcpTools,
 
-        // Server-side tool: runs automatically on the server
-        getWeather: tool({
-          description: "Get the current weather for a city",
-          inputSchema: z.object({
-            city: z.string().describe("City name")
-          }),
-          execute: async ({ city }) => {
-            // Replace with a real weather API in production
-            const conditions = ["sunny", "cloudy", "rainy", "snowy"];
-            const temp = Math.floor(Math.random() * 30) + 5;
-            return {
-              city,
-              temperature: temp,
-              condition:
-                conditions[Math.floor(Math.random() * conditions.length)],
-              unit: "celsius"
-            };
-          }
-        }),
-
-        // Client-side tool: no execute function — the browser handles it
         getUserTimezone: tool({
           description:
-            "Get the user's timezone from their browser. Use this when you need to know the user's local time.",
+            "Get the user's timezone from their browser. Use this when you need to know the user's local time for scheduling.",
           inputSchema: z.object({})
-        }),
-
-        // Approval tool: requires user confirmation before executing
-        calculate: tool({
-          description:
-            "Perform a math calculation with two numbers. Requires user approval for large numbers.",
-          inputSchema: z.object({
-            a: z.number().describe("First number"),
-            b: z.number().describe("Second number"),
-            operator: z
-              .enum(["+", "-", "*", "/", "%"])
-              .describe("Arithmetic operator")
-          }),
-          needsApproval: async ({ a, b }) =>
-            Math.abs(a) > 1000 || Math.abs(b) > 1000,
-          execute: async ({ a, b, operator }) => {
-            const ops: Record<string, (x: number, y: number) => number> = {
-              "+": (x, y) => x + y,
-              "-": (x, y) => x - y,
-              "*": (x, y) => x * y,
-              "/": (x, y) => x / y,
-              "%": (x, y) => x % y
-            };
-            if (operator === "/" && b === 0) {
-              return { error: "Division by zero" };
-            }
-            return {
-              expression: `${a} ${operator} ${b}`,
-              result: ops[operator](a, b)
-            };
-          }
         }),
 
         scheduleTask: tool({
           description:
-            "Schedule a task to be executed at a later time. Use this when the user asks to be reminded or wants something done later.",
+            "Schedule a practice session or reminder. Use this when the user asks to be reminded or wants to schedule a follow-up session.",
           inputSchema: scheduleSchema,
           execute: async ({ when, description }) => {
             if (when.type === "no-schedule") {
@@ -140,33 +99,33 @@ If the user asks to schedule a task, use the schedule tool to schedule the task.
             if (!input) return "Invalid schedule type";
             try {
               this.schedule(input, "executeTask", description);
-              return `Task scheduled: "${description}" (${when.type}: ${input})`;
+              return `Reminder scheduled: "${description}" (${when.type}: ${input})`;
             } catch (error) {
-              return `Error scheduling task: ${error}`;
+              return `Error scheduling: ${error}`;
             }
           }
         }),
 
         getScheduledTasks: tool({
-          description: "List all tasks that have been scheduled",
+          description: "List all scheduled practice sessions and reminders",
           inputSchema: z.object({}),
           execute: async () => {
             const tasks = this.getSchedules();
-            return tasks.length > 0 ? tasks : "No scheduled tasks found.";
+            return tasks.length > 0 ? tasks : "No scheduled sessions found.";
           }
         }),
 
         cancelScheduledTask: tool({
-          description: "Cancel a scheduled task by its ID",
+          description: "Cancel a scheduled session by its ID",
           inputSchema: z.object({
             taskId: z.string().describe("The ID of the task to cancel")
           }),
           execute: async ({ taskId }) => {
             try {
               this.cancelSchedule(taskId);
-              return `Task ${taskId} cancelled.`;
+              return `Session ${taskId} cancelled.`;
             } catch (error) {
-              return `Error cancelling task: ${error}`;
+              return `Error cancelling: ${error}`;
             }
           }
         })
@@ -179,13 +138,7 @@ If the user asks to schedule a task, use the schedule tool to schedule the task.
   }
 
   async executeTask(description: string, _task: Schedule<string>) {
-    // Do the actual work here (send email, call API, etc.)
     console.log(`Executing scheduled task: ${description}`);
-
-    // Notify connected clients via a broadcast event.
-    // We use broadcast() instead of saveMessages() to avoid injecting
-    // into chat history — that would cause the AI to see the notification
-    // as new context and potentially loop.
     this.broadcast(
       JSON.stringify({
         type: "scheduled-task",
